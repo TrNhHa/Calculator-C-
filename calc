@@ -1,0 +1,364 @@
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+
+namespace GlassCalculator
+{
+    public partial class CalculatorForm : Form
+    {
+        // =========== Blur Acrylic Setup ===========
+        [DllImport("user32.dll")]
+        private static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+
+        private enum AccentState
+        {
+            ACCENT_DISABLED = 0,
+            ACCENT_ENABLE_GRADIENT = 1,
+            ACCENT_ENABLE_TRANSPARENTGRADIENT = 2,
+            ACCENT_ENABLE_BLURBEHIND = 3,
+            ACCENT_ENABLE_ACRYLICBLURBEHIND = 4,
+            ACCENT_INVALID_STATE = 5
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct AccentPolicy
+        {
+            public AccentState AccentState;
+            public int AccentFlags;
+            public int GradientColor;
+            public int AnimationId;
+        }
+
+        private enum WindowCompositionAttribute
+        {
+            WCA_ACCENT_POLICY = 19
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WindowCompositionAttributeData
+        {
+            public WindowCompositionAttribute Attribute;
+            public IntPtr Data;
+            public int SizeOfData;
+        }
+
+        // =========== Controls ===========
+        private TextBox txtDisplay;
+        private ListBox lstHistory;
+        private Button btnToggleTheme;
+
+        private readonly List<Button> calcButtons = new List<Button>();
+
+        private bool darkMode = true;
+
+        private readonly LinkedList<string> history = new LinkedList<string>();
+
+        public CalculatorForm()
+        {
+            InitializeComponent();
+            InitForm();
+            EnableAcrylicBlur();
+            ApplyTheme();
+        }
+
+        private void InitForm()
+        {
+            this.Text = "Glassmorphism Calculator";
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
+            this.MaximizeBox = false;
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.Size = new Size(400, 650);
+            this.BackColor = Color.FromArgb(50, 30, 30, 30);
+            this.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
+
+            // Display textbox
+            txtDisplay = new TextBox
+            {
+                ReadOnly = true,
+                Font = new Font("Segoe UI", 24F, FontStyle.Bold),
+                Location = new Point(20, 20),
+                Size = new Size(340, 50),
+                BackColor = Color.FromArgb(80, 50, 50, 50),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.None,
+                TextAlign = HorizontalAlignment.Right
+            };
+            this.Controls.Add(txtDisplay);
+
+            // History listbox
+            lstHistory = new ListBox
+            {
+                Location = new Point(20, 80),
+                Size = new Size(340, 100),
+                BackColor = Color.FromArgb(80, 50, 50, 50),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.None,
+                Font = new Font("Segoe UI", 10F),
+                HorizontalScrollbar = true
+            };
+            this.Controls.Add(lstHistory);
+
+            // Buttons definition
+            string[] buttonTexts = {
+                "7", "8", "9", "/", "sqrt",
+                "4", "5", "6", "*", "abs",
+                "1", "2", "3", "-", "(", 
+                "0", ".", "=", "+", ")",
+                "C", "CE", "Dark/Light"
+            };
+
+            int btnWidth = 65, btnHeight = 50;
+            int startX = 20, startY = 190;
+            int margin = 10;
+
+            // Create buttons
+            for (int i = 0; i < buttonTexts.Length; i++)
+            {
+                var btn = new Button
+                {
+                    Text = buttonTexts[i],
+                    Size = new Size(btnWidth, btnHeight),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = Color.FromArgb(80, 255, 255, 255),
+                    ForeColor = Color.Black,
+                    Font = new Font("Segoe UI", 12F, FontStyle.Bold),
+                    Cursor = Cursors.Hand,
+                    TabStop = false
+                };
+                btn.FlatAppearance.BorderSize = 0;
+                btn.Tag = btn.Text;
+
+                int col = i % 5;
+                int row = i / 5;
+
+                btn.Location = new Point(startX + col * (btnWidth + margin), startY + row * (btnHeight + margin));
+
+                btn.MouseEnter += Btn_MouseEnter;
+                btn.MouseLeave += Btn_MouseLeave;
+                btn.Click += Btn_Click;
+
+                this.Controls.Add(btn);
+                calcButtons.Add(btn);
+            }
+
+            // Dark/Light toggle button reference
+            btnToggleTheme = calcButtons.FirstOrDefault(b => b.Text == "Dark/Light");
+        }
+
+        private void Btn_MouseEnter(object sender, EventArgs e)
+        {
+            if (sender is Button btn)
+            {
+                btn.BackColor = darkMode ? Color.FromArgb(120, 255, 255, 255) : Color.FromArgb(150, 50, 50, 50);
+            }
+        }
+
+        private void Btn_MouseLeave(object sender, EventArgs e)
+        {
+            if (sender is Button btn)
+            {
+                btn.BackColor = darkMode ? Color.FromArgb(80, 255, 255, 255) : Color.FromArgb(80, 50, 50, 50);
+            }
+        }
+
+        private void Btn_Click(object sender, EventArgs e)
+        {
+            if (sender is Button btn)
+            {
+                string cmd = btn.Text;
+
+                if (cmd == "Dark/Light")
+                {
+                    darkMode = !darkMode;
+                    ApplyTheme();
+                    return;
+                }
+                else if (cmd == "C")
+                {
+                    txtDisplay.Text = "";
+                }
+                else if (cmd == "CE")
+                {
+                    if (txtDisplay.Text.Length > 0)
+                        txtDisplay.Text = txtDisplay.Text.Substring(0, txtDisplay.Text.Length - 1);
+                }
+                else if (cmd == "=")
+                {
+                    CalculateExpression();
+                }
+                else
+                {
+                    AppendInput(cmd);
+                }
+            }
+        }
+
+        private void AppendInput(string text)
+        {
+            // Map sqrt -> Math.Sqrt, abs -> Math.Abs for eval expression
+            if (text == "sqrt")
+                text = "Math.Sqrt(";
+            else if (text == "abs")
+                text = "Math.Abs(";
+
+            txtDisplay.Text += text;
+        }
+
+        private void CalculateExpression()
+        {
+            string expr = txtDisplay.Text;
+
+            if (string.IsNullOrWhiteSpace(expr))
+                return;
+
+            try
+            {
+                // Replace 'Math.Sqrt' and 'Math.Abs' with custom functions for DataTable.Compute
+                string parsedExpr = ParseCustomFunctions(expr);
+
+                // Evaluate using DataTable.Compute for basic math
+                var dt = new DataTable();
+                var value = dt.Compute(parsedExpr, "");
+
+                // Display result
+                txtDisplay.Text = value.ToString();
+
+                // Add to history
+                AddHistory($"{expr} = {value}");
+            }
+            catch (Exception ex)
+            {
+                txtDisplay.Text = "Error";
+            }
+        }
+
+        private string ParseCustomFunctions(string expr)
+        {
+            // Replace Math.Sqrt(x) with sqrt(x)
+            // Replace Math.Abs(x) with abs(x)
+
+            // We'll parse sqrt(...) and abs(...) manually
+
+            string patternSqrt = @"Math\.Sqrt\(([^)]+)\)";
+            string patternAbs = @"Math\.Abs\(([^)]+)\)";
+
+            // Evaluate sqrt(...) and abs(...) recursively
+
+            expr = Regex.Replace(expr, patternSqrt, match =>
+            {
+                double val = EvaluateSimpleExpression(match.Groups[1].Value);
+                return Math.Sqrt(val).ToString();
+            });
+
+            expr = Regex.Replace(expr, patternAbs, match =>
+            {
+                double val = EvaluateSimpleExpression(match.Groups[1].Value);
+                return Math.Abs(val).ToString();
+            });
+
+            return expr;
+        }
+
+        private double EvaluateSimpleExpression(string simpleExpr)
+        {
+            var dt = new DataTable();
+            var result = dt.Compute(simpleExpr, "");
+            return Convert.ToDouble(result);
+        }
+
+        private void AddHistory(string record)
+        {
+            history.AddFirst(record);
+            if (history.Count > 5)
+                history.RemoveLast();
+
+            lstHistory.Items.Clear();
+            foreach (var item in history)
+                lstHistory.Items.Add(item);
+        }
+
+        private void ApplyTheme()
+        {
+            Color bg, fg, btnBg, btnFg;
+
+            if (darkMode)
+            {
+                bg = Color.FromArgb(50, 30, 30, 30);
+                fg = Color.White;
+                btnBg = Color.FromArgb(80, 255, 255, 255);
+                btnFg = Color.Black;
+            }
+            else
+            {
+                bg = Color.FromArgb(50, 255, 255, 255);
+                fg = Color.Black;
+                btnBg = Color.FromArgb(80, 50, 50, 50);
+                btnFg = Color.White;
+            }
+
+            this.BackColor = bg;
+            txtDisplay.BackColor = btnBg;
+            txtDisplay.ForeColor = fg;
+            lstHistory.BackColor = btnBg;
+            lstHistory.ForeColor = fg;
+
+            foreach (var btn in calcButtons)
+            {
+                btn.BackColor = btnBg;
+                btn.ForeColor = btnFg;
+            }
+        }
+
+        private void EnableAcrylicBlur()
+        {
+            var accent = new AccentPolicy();
+            accent.AccentState = AccentState.ACCENT_ENABLE_ACRYLICBLURBEHIND;
+            accent.GradientColor = (0xCC << 24) | (0xFFFFFF); // Alpha + White
+
+            var accentStructSize = Marshal.SizeOf(accent);
+
+            var accentPtr = Marshal.AllocHGlobal(accentStructSize);
+            Marshal.StructureToPtr(accent, accentPtr, false);
+
+            var data = new WindowCompositionAttributeData();
+            data.Attribute = WindowCompositionAttribute.WCA_ACCENT_POLICY;
+            data.SizeOfData = accentStructSize;
+            data.Data = accentPtr;
+
+            SetWindowCompositionAttribute(this.Handle, ref data);
+
+            Marshal.FreeHGlobal(accentPtr);
+        }
+    }
+
+    // Extension for rounded rectangle fill for Graphics
+    public static class GraphicsExtensions
+    {
+        public static void FillRoundedRectangle(this Graphics g, Brush brush, Rectangle rect, int radius)
+        {
+            using (var path = RoundedRect(rect, radius))
+            {
+                g.FillPath(brush, path);
+            }
+        }
+
+        private static System.Drawing.Drawing2D.GraphicsPath RoundedRect(Rectangle bounds, int radius)
+        {
+            int diameter = radius * 2;
+            var path = new System.Drawing.Drawing2D.GraphicsPath();
+
+            path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+
+            return path;
+        }
+    }
+}
